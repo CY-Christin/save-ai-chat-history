@@ -1,18 +1,15 @@
-// Notion writer — runs in the background service worker.
+// Notion sink — one of the pluggable landing channels (see sinks/registry.js).
 //
-// Responsibilities:
-//  - Read token + root page id from chrome.storage (entered manually for now).
-//  - Ensure structure: root page → "Claude" page → "Claude Conversations" db
-//    (ids cached in chrome.storage so we don't recreate them).
-//  - Upsert one row-page per conversation, keyed by the "Conversation ID"
-//    property (idempotent across devices / reinstalls).
-//  - Append fresh messages as blocks, respecting Notion API limits.
+// Implements the sink contract: { id, name, configFields, sync(config, conv,
+// alreadySynced) → { newlySynced, ref } }. Config (token + root page id) is
+// passed in by the caller (resolved from chrome.storage / settings page), not
+// read here.
 //
-// M2 scope: conversation body is written as plain-text paragraphs (no full
-// markdown→blocks fidelity yet — that needs a bundler). Speaker is shown via a
-// colored callout label; thinking / tool calls go into toggles.
+// Behavior: ensure structure (root page → "Claude" page → "Claude Conversations"
+// db, ids cached), upsert one row-page per conversation keyed by "Conversation
+// ID" (idempotent), then append fresh messages as blocks (markdown via martian),
+// respecting Notion API limits.
 
-import { LOCAL_NOTION } from './local-config.js';
 import { markdownToBlocks } from '@tryfabric/martian';
 
 const NOTION = 'https://api.notion.com/v1';
@@ -60,55 +57,84 @@ async function napi(token, path, method = 'GET', body) {
     const text = await res.text();
     const data = text ? JSON.parse(text) : {};
     if (!res.ok) {
-      throw new Error(`[notion] ${res.status} ${method} ${path}: ${data.message || text}`);
+      const err = new Error(`[notion] ${res.status} ${method} ${path}: ${data.message || text}`);
+      err.status = res.status;
+      throw err;
     }
     return data;
   }
   throw new Error(`[notion] gave up after retries: ${method} ${path}`);
 }
 
-// ---- config ----------------------------------------------------------------
-// Prefer the gitignored local-config.js (optional dev hardcode), else
-// chrome.storage (set via the settings page). local-config.js is a static import
-// because the bundle inlines it; build.mjs auto-creates an empty stub if missing.
-export async function getConfig() {
-  if (LOCAL_NOTION?.token && LOCAL_NOTION?.rootPageId) return LOCAL_NOTION;
-
-  const { notionToken, notionRootPageId } = await chrome.storage.local.get([
-    'notionToken',
-    'notionRootPageId',
-  ]);
-  if (!notionToken || !notionRootPageId) return null;
-  return { token: notionToken, rootPageId: notionRootPageId };
+// ---- structure (cached) ----------------------------------------------------
+// List all child blocks of a page (handles pagination).
+async function listChildren(token, blockId) {
+  const out = [];
+  let cursor = null;
+  do {
+    const qs = `?page_size=100${cursor ? `&start_cursor=${cursor}` : ''}`;
+    const data = await napi(token, `/blocks/${blockId}/children${qs}`);
+    out.push(...(data.results || []));
+    cursor = data.has_more ? data.next_cursor : null;
+  } while (cursor);
+  return out;
 }
 
-// ---- structure (cached) ----------------------------------------------------
+// Find an existing child page / database by exact title (returns its id or null).
+// Trashed items don't appear in children, so this naturally ignores deleted ones.
+async function findChildByTitle(token, parentId, type, title) {
+  const children = await listChildren(token, parentId);
+  const hit = children.find((b) => b.type === type && b[type]?.title === title);
+  return hit?.id || null;
+}
+
+// Ensure root → "Claude" page → "Claude Conversations" db exist. Source of truth
+// is Notion's ACTUAL content: we look up existing items by title and reuse them,
+// creating only what's missing — so a stale cache, a renamed/recreated structure,
+// or a user-deleted db can't cause duplicates. The cache is only a fast path.
 async function ensureStructure(cfg) {
   const cacheKey = `notionStruct:${cfg.rootPageId}`;
   const cached = (await chrome.storage.local.get(cacheKey))[cacheKey];
-  if (cached?.dbId) return cached;
 
-  // Verify connectivity + token up front with a cheap call.
-  await napi(cfg.token, '/users/me');
+  // Fast path: cached db still live (not deleted/trashed) → use it as-is.
+  if (cached?.dbId) {
+    try {
+      const db = await napi(cfg.token, `/databases/${cached.dbId}`);
+      if (!db.archived && !db.in_trash) return cached;
+    } catch (e) {
+      if (e.status !== 404) throw e; // 404 → fall through to discovery
+    }
+  }
 
-  const claudePage = await napi(cfg.token, '/pages', 'POST', {
-    parent: { type: 'page_id', page_id: cfg.rootPageId },
-    properties: { title: { title: [{ text: { content: PLATFORM_PAGE } }] } },
-  });
+  // Slow path: discover by title, create only what's missing.
+  await napi(cfg.token, '/users/me'); // connectivity + token check
 
-  const db = await napi(cfg.token, '/databases', 'POST', {
-    parent: { type: 'page_id', page_id: claudePage.id },
-    title: [{ text: { content: DB_NAME } }],
-    properties: {
-      [PROP.title]: { title: {} },
-      [PROP.date]: { date: {} },
-      [PROP.turns]: { number: {} },
-      [PROP.url]: { url: {} },
-      [PROP.convId]: { rich_text: {} },
-    },
-  });
+  let claudePageId = await findChildByTitle(cfg.token, cfg.rootPageId, 'child_page', PLATFORM_PAGE);
+  if (!claudePageId) {
+    const page = await napi(cfg.token, '/pages', 'POST', {
+      parent: { type: 'page_id', page_id: cfg.rootPageId },
+      properties: { title: { title: [{ text: { content: PLATFORM_PAGE } }] } },
+    });
+    claudePageId = page.id;
+  }
 
-  const struct = { claudePageId: claudePage.id, dbId: db.id };
+  let dbId = await findChildByTitle(cfg.token, claudePageId, 'child_database', DB_NAME);
+  if (!dbId) {
+    const db = await napi(cfg.token, '/databases', 'POST', {
+      parent: { type: 'page_id', page_id: claudePageId },
+      title: [{ text: { content: DB_NAME } }],
+      properties: {
+        [PROP.title]: { title: {} },
+        [PROP.date]: { date: {} },
+        [PROP.turns]: { number: {} },
+        [PROP.url]: { url: {} },
+        [PROP.convId]: { rich_text: {} },
+      },
+    });
+    dbId = db.id;
+  }
+
+  const struct = { claudePageId, dbId };
   await chrome.storage.local.set({ [cacheKey]: struct });
   return struct;
 }
@@ -239,25 +265,43 @@ async function appendInBatches(token, pageId, blocks) {
   }
 }
 
-// ---- public entry ----------------------------------------------------------
+// ---- sink ------------------------------------------------------------------
 // Writes fresh (not-yet-synced) messages. Returns ids that were successfully
 // written, so the caller marks them synced only after a durable write.
-export async function syncConversation(conv, alreadySynced) {
-  const cfg = await getConfig();
-  if (!cfg) {
-    const err = new Error('NOT_CONFIGURED');
-    err.code = 'NOT_CONFIGURED';
-    throw err;
-  }
+async function sync(config, conv, alreadySynced) {
   const turns = conv.messages.filter((m) => m.role === 'assistant').length;
-  const { dbId } = await ensureStructure(cfg);
-  const pageId = await upsertConversationRow(cfg, dbId, conv, turns);
+  const { dbId } = await ensureStructure(config);
+  const pageId = await upsertConversationRow(config, dbId, conv, turns);
 
   const newlySynced = [];
   for (const m of conv.messages) {
     if (alreadySynced.has(m.id)) continue;
-    await appendInBatches(cfg.token, pageId, buildMessageBlocks(m));
+    await appendInBatches(config.token, pageId, buildMessageBlocks(m));
     newlySynced.push(m.id); // per-message durability boundary
   }
-  return { pageId, newlySynced };
+  return { newlySynced, ref: pageId };
 }
+
+export const notionSink = {
+  id: 'notion',
+  name: 'Notion',
+  configFields: [
+    {
+      key: 'token',
+      label: 'Integration Token',
+      type: 'password',
+      placeholder: 'ntn_...',
+      required: true,
+      help: '在 notion.so/my-integrations 建 Internal integration 获取',
+    },
+    {
+      key: 'rootPageId',
+      label: 'Root Page ID',
+      type: 'text',
+      placeholder: '32 位十六进制（取自 page URL）',
+      required: true,
+      help: '先把 integration 加到该 page 的 Connections 授权',
+    },
+  ],
+  sync,
+};

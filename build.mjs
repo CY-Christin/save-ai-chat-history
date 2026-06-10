@@ -1,7 +1,7 @@
 // Build: bundle src/ → dist/ with esbuild, and emit a dist manifest whose paths
 // drop the `src/` prefix. Chrome loads dist/. Run `npm run build` or `npm run watch`.
 import esbuild from 'esbuild';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -9,6 +9,7 @@ const ENTRYPOINTS = [
   'src/background/service-worker.js',
   'src/content/bridge.js',
   'src/inject/main-world.js',
+  'src/options/options.js',
 ];
 
 // local-config.js is gitignored and statically imported by notion.js. On a fresh
@@ -35,9 +36,16 @@ async function buildManifest() {
   const strip = (s) => s.replace(/^src\//, '');
   m.background.service_worker = strip(m.background.service_worker);
   delete m.background.type;
+  if (m.options_page) m.options_page = strip(m.options_page);
   for (const cs of m.content_scripts || []) cs.js = (cs.js || []).map(strip);
   await mkdir('dist', { recursive: true });
   await writeFile('dist/manifest.json', JSON.stringify(m, null, 2) + '\n');
+}
+
+// Copy non-bundled static assets (HTML) into dist.
+async function copyAssets() {
+  await mkdir('dist/options', { recursive: true });
+  await copyFile('src/options/options.html', 'dist/options/options.html');
 }
 
 const options = {
@@ -58,6 +66,7 @@ const options = {
 
 await ensureLocalConfig();
 await buildManifest();
+await copyAssets();
 
 if (process.argv.includes('--watch')) {
   const ctx = await esbuild.context(options);

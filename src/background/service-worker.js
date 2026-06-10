@@ -1,15 +1,32 @@
 // Background service worker — receives captured conversations, normalizes them
-// to the common ConversationModel, diffs by message id against locally-seen ids,
-// and logs what we WOULD write to Notion.
+// to the common ConversationModel, then fans out to every ENABLED sink (landing
+// channel). Each sink diffs by message id against its own per-sink synced state
+// and messages are marked synced ONLY after a durable write.
 //
-// When Notion is configured (chrome.storage has notionToken + notionRootPageId),
-// fresh messages are written to Notion and marked synced ONLY after a durable
-// write. When NOT configured, we fall back to M1 behavior (mark seen immediately)
-// so the diff stays observable.
-// To reset the demo, open this worker's DevTools console and run:
+// To reset, open this worker's DevTools console and run:
 //     chrome.storage.local.clear()
 
-import { syncConversation, getConfig } from './notion.js';
+import { SINKS } from '../sinks/registry.js';
+import { getSinkSettings, isConfigComplete } from './sink-settings.js';
+import { LOCAL_NOTION } from './local-config.js';
+
+// Resolve which sinks to run: those explicitly enabled with complete config in
+// settings, plus a dev fallback — if Notion was never configured in settings but
+// local-config.js has values, run it (so hardcoded dev creds keep working).
+async function getActiveSinks() {
+  const settings = await getSinkSettings();
+  const active = [];
+  for (const sink of SINKS) {
+    const setting = settings[sink.id];
+    if (setting?.enabled) {
+      if (isConfigComplete(sink, setting.config)) active.push({ sink, config: setting.config });
+      else console.log(`[ACNS] sink ${sink.id} enabled but config incomplete — skipped`);
+    } else if (!setting && sink.id === 'notion' && LOCAL_NOTION?.token && LOCAL_NOTION?.rootPageId) {
+      active.push({ sink, config: LOCAL_NOTION });
+    }
+  }
+  return active;
+}
 
 // ---- Claude normalize (per-platform; will move into an adapter later) --------
 function collectFiles(m) {
@@ -76,15 +93,20 @@ function preview(text, n = 70) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+function messageTags(m) {
+  return [
+    m.thinking.length ? `thinking×${m.thinking.length}` : '',
+    m.tools.length ? `tools×${m.tools.length}` : '',
+    m.files.length ? `files:[${m.files.map((f) => f.name).join(', ')}]` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
 async function handleConversation(platform, raw) {
   const normalize = NORMALIZERS[platform];
   if (!normalize) return;
   const conv = normalize(raw);
-
-  const key = `synced:${conv.platform}:${conv.id}`;
-  const stored = (await chrome.storage.local.get(key))[key] || { messageIds: [] };
-  const seen = new Set(stored.messageIds);
-  const fresh = conv.messages.filter((m) => !seen.has(m.id));
   const turns = conv.messages.filter((m) => m.role === 'assistant').length;
 
   console.groupCollapsed(
@@ -93,45 +115,50 @@ async function handleConversation(platform, raw) {
   );
   console.log('conversation id :', conv.id);
   console.log('messages total  :', conv.messages.length);
-  console.log('already seen    :', seen.size);
-  console.log('NEW this capture:', fresh.length);
   console.log('turns (AI 答完) :', turns);
-  for (const m of fresh) {
-    const tags = [
-      m.thinking.length ? `thinking×${m.thinking.length}` : '',
-      m.tools.length ? `tools×${m.tools.length}` : '',
-      m.files.length ? `files:[${m.files.map((f) => f.name).join(', ')}]` : '',
-    ]
-      .filter(Boolean)
-      .join(' ');
-    console.log(`  + [${m.role}] ${preview(m.text)}${tags ? '  ' + tags : ''}`);
-  }
-  console.groupEnd();
 
-  if (!fresh.length) return;
-
-  const cfg = await getConfig();
-  const markSynced = async (ids) => {
-    const messageIds = [...seen, ...ids];
-    await chrome.storage.local.set({ [key]: { messageIds, title: conv.title } });
-  };
-
-  if (!cfg) {
-    // Notion not configured → do NOT mark synced (that would falsely record
-    // messages as written and they'd never sync once configured). Just report.
-    console.log('[ACNS] Notion not configured — set credentials to write. (not marking synced)');
+  const active = await getActiveSinks();
+  if (!active.length) {
+    console.log('no sink enabled — configure one in the settings page.');
+    console.groupEnd();
     return;
   }
 
-  try {
-    const { pageId, newlySynced } = await syncConversation(conv, seen);
-    // Mark synced only after a durable write; partial progress is preserved.
-    if (newlySynced.length) await markSynced(newlySynced);
-    console.log(`%c[ACNS] → Notion ✓ wrote ${newlySynced.length} message(s) to page ${pageId}`,
-      'color:#10b981');
-  } catch (e) {
-    console.warn('[ACNS] Notion write failed (will retry next trigger):', e.message);
+  // Fan out to each sink with its OWN per-sink synced state. Mark synced only
+  // after a durable write, so a failed sink retries on the next trigger.
+  for (const { sink, config } of active) {
+    const key = `synced:${sink.id}:${conv.platform}:${conv.id}`;
+    const stored = (await chrome.storage.local.get(key))[key] || { messageIds: [] };
+    const seen = new Set(stored.messageIds);
+    const fresh = conv.messages.filter((m) => !seen.has(m.id));
+
+    if (!fresh.length) {
+      console.log(`${sink.id}: up to date (0 new)`);
+      continue;
+    }
+    console.groupCollapsed(`${sink.id}: ${fresh.length} new`);
+    for (const m of fresh) {
+      const tags = messageTags(m);
+      console.log(`  + [${m.role}] ${preview(m.text)}${tags ? '  ' + tags : ''}`);
+    }
+    console.groupEnd();
+
+    try {
+      const { newlySynced, ref } = await sink.sync(config, conv, seen);
+      if (newlySynced?.length) {
+        await chrome.storage.local.set({
+          [key]: { messageIds: [...seen, ...newlySynced], title: conv.title },
+        });
+      }
+      console.log(
+        `%c→ ${sink.id} ✓ wrote ${newlySynced?.length || 0} msg${ref ? ' → ' + ref : ''}`,
+        'color:#10b981'
+      );
+    } catch (e) {
+      console.warn(`→ ${sink.id} failed (will retry next trigger):`, e.message);
+    }
   }
+  console.groupEnd();
 }
 
 // ---- message intake ----------------------------------------------------------
