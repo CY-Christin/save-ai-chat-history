@@ -4,9 +4,10 @@
   "version": "0.0.1",
   "description": "Archive AI conversations to Notion. M1: Claude capture pipeline (no Notion writes yet).",
   "permissions": ["storage"],
-  "host_permissions": ["https://claude.ai/*"],
+  "host_permissions": ["https://claude.ai/*", "https://api.notion.com/*"],
   "background": {
-    "service_worker": "src/background/service-worker.js"
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
   },
   "content_scripts": [
     {

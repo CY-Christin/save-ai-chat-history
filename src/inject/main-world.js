@@ -66,13 +66,17 @@
         // New conversations 404 briefly: the URL flips to /chat/{id} before the
         // server has created it. Retry once after it settles.
         if (res.status === 404 && !reason.endsWith(':retry')) {
+          console.warn(`[ACNS] refetch 404 (${reason}) conv=${conv} → retry in 1.5s`);
           setTimeout(() => refetchConversation(org, conv, reason + ':retry'), 1500);
         } else {
+          console.warn(`[ACNS] refetch FAILED status=${res.status} (${reason}) conv=${conv}`);
           post('error', { stage: 'refetch', status: res.status, conv });
         }
         return;
       }
-      post('conversation', { source: reason, raw: await res.json() });
+      const raw = await res.json();
+      console.log(`%c[ACNS] refetch ok (${reason}) conv=${conv} msgs=${(raw.chat_messages || []).length} → posting`, 'color:#10b981');
+      post('conversation', { source: reason, raw });
     } catch (e) {
       post('error', { stage: 'refetch', message: String(e), conv });
     }

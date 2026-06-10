@@ -2,10 +2,14 @@
 // to the common ConversationModel, diffs by message id against locally-seen ids,
 // and logs what we WOULD write to Notion.
 //
-// M1 scope: NO Notion writes. We persist "seen" message ids so you can watch the
-// diff work: first open = all new; reopen = 0 new; new turn = +1..2 new.
+// When Notion is configured (chrome.storage has notionToken + notionRootPageId),
+// fresh messages are written to Notion and marked synced ONLY after a durable
+// write. When NOT configured, we fall back to M1 behavior (mark seen immediately)
+// so the diff stays observable.
 // To reset the demo, open this worker's DevTools console and run:
 //     chrome.storage.local.clear()
+
+import { syncConversation, getConfig } from './notion.js';
 
 // ---- Claude normalize (per-platform; will move into an adapter later) --------
 function collectFiles(m) {
@@ -27,23 +31,28 @@ function normalizeClaude(raw) {
   const messages = (raw.chat_messages || []).map((m) => {
     const role = m.sender === 'human' ? 'human' : 'assistant';
     const content = Array.isArray(m.content) ? m.content : [];
-    let text = '';
-    const thinking = [];
-    const tools = [];
+
+    // Preserve the ORIGINAL order of content parts so tool calls / thinking land
+    // in their real position relative to the answer (Claude orders content[] as
+    // thinking → tool_use → tool_result → text as they actually happened).
+    const segments = [];
     for (const c of content) {
-      if (c.type === 'text') text += c.text || '';
-      else if (c.type === 'thinking') thinking.push(c.thinking || c.text || '');
-      else if (c.type === 'tool_use') tools.push({ name: c.name, input: c.input });
-      else if (c.type === 'tool_result') tools.push({ name: c.name, result: c.content });
+      if (c.type === 'text' && c.text) segments.push({ kind: 'text', text: c.text });
+      else if (c.type === 'thinking') segments.push({ kind: 'thinking', text: c.thinking || c.text || '' });
+      else if (c.type === 'tool_use') segments.push({ kind: 'tool_use', name: c.name, input: c.input });
+      else if (c.type === 'tool_result') segments.push({ kind: 'tool_result', name: c.name, result: c.content });
     }
-    if (!text && m.text) text = m.text; // fallback for older shapes
+    if (!segments.length && m.text) segments.push({ kind: 'text', text: m.text }); // older shapes
+
     return {
       id: m.uuid,
       role,
       createdAt: m.created_at,
-      text,
-      thinking,
-      tools,
+      segments,
+      // Derived views for the console preview (order doesn't matter here).
+      text: segments.filter((s) => s.kind === 'text').map((s) => s.text).join(''),
+      thinking: segments.filter((s) => s.kind === 'thinking').map((s) => s.text),
+      tools: segments.filter((s) => s.kind === 'tool_use' || s.kind === 'tool_result'),
       files: collectFiles(m),
     };
   });
@@ -99,11 +108,29 @@ async function handleConversation(platform, raw) {
   }
   console.groupEnd();
 
-  // M1: mark fresh ids as "seen" so the diff is observable across captures.
-  // (In M2 this becomes "mark seen ONLY after a successful Notion write".)
-  if (fresh.length) {
-    const messageIds = [...seen, ...fresh.map((m) => m.id)];
+  if (!fresh.length) return;
+
+  const cfg = await getConfig();
+  const markSynced = async (ids) => {
+    const messageIds = [...seen, ...ids];
     await chrome.storage.local.set({ [key]: { messageIds, title: conv.title } });
+  };
+
+  if (!cfg) {
+    // Notion not configured → do NOT mark synced (that would falsely record
+    // messages as written and they'd never sync once configured). Just report.
+    console.log('[ACNS] Notion not configured — set credentials to write. (not marking synced)');
+    return;
+  }
+
+  try {
+    const { pageId, newlySynced } = await syncConversation(conv, seen);
+    // Mark synced only after a durable write; partial progress is preserved.
+    if (newlySynced.length) await markSynced(newlySynced);
+    console.log(`%c[ACNS] → Notion ✓ wrote ${newlySynced.length} message(s) to page ${pageId}`,
+      'color:#10b981');
+  } catch (e) {
+    console.warn('[ACNS] Notion write failed (will retry next trigger):', e.message);
   }
 }
 
@@ -111,6 +138,7 @@ async function handleConversation(platform, raw) {
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg || msg.kind !== 'capture') return;
   if (msg.type === 'conversation' && msg.payload && msg.payload.raw) {
+    console.log(`[ACNS] recv conversation (source=${msg.payload.source})`);
     handleConversation(msg.platform, msg.payload.raw).catch((e) =>
       console.warn('[ACNS] handle error', e)
     );

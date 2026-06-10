@@ -9,6 +9,7 @@ dist/
 .env
 .env.local
 *.local
+src/background/local-config.js
 
 # Internal design docs — kept local, not published
 docs/
