@@ -1,8 +1,16 @@
 // ISOLATED-world content script — the only side that can talk to chrome.*.
-// It just relays tagged page messages from the MAIN-world hook to the background.
+// It relays tagged page messages from the MAIN-world hook to the background,
+// and control messages (e.g. popup's force resync) back into the page.
 
 (() => {
   const TAG = 'acns';
+
+  // background → page: forward control messages to the MAIN-world hook.
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.kind === 'control' && msg.type === 'refetch') {
+      window.postMessage({ __source: `${TAG}-ctl`, type: 'refetch' }, location.origin);
+    }
+  });
 
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;

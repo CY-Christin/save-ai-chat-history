@@ -1,6 +1,6 @@
 // Background service worker — receives captured conversations, normalizes them
-// to the common ConversationModel, then fans out to every ENABLED sink (landing
-// channel). Each sink diffs by message id against its own per-sink synced state
+// to the common ConversationModel, then fans out to every ENABLED sink (sync
+// target). Each sink diffs by message id against its own per-sink synced state
 // and messages are marked synced ONLY after a durable write.
 //
 // To reset, open this worker's DevTools console and run:
@@ -9,6 +9,8 @@
 import { SINKS } from '../sinks/registry.js';
 import { getSinkSettings, isConfigComplete } from './sink-settings.js';
 import { LOCAL_NOTION } from './local-config.js';
+import { normalizeClaude } from './normalize/claude.js';
+import { normalizeChatGPT } from './normalize/chatgpt.js';
 
 // Resolve which sinks to run: those explicitly enabled with complete config in
 // settings, plus a dev fallback — if Notion was never configured in settings but
@@ -28,81 +30,8 @@ async function getActiveSinks() {
   return active;
 }
 
-// ---- Claude normalize (per-platform; will move into an adapter later) --------
-function basename(p) {
-  return String(p || '').split('/').pop() || String(p || '');
-}
-
-// Extract file refs WITH content from a message. Two sources carry real content:
-//  - uploaded files:  attachments[].extracted_content
-//  - AI-created files: content[].tool_use[create_file].input.file_text
-// present_files / local_resource are display-only pointers (no content) and are
-// usually copies of already-captured files, so we skip them to avoid duplicates.
-function collectFileRefs(m) {
-  const refs = [];
-  for (const a of m.attachments || []) {
-    refs.push({
-      name: a.file_name || '(file)',
-      content: a.extracted_content ?? null,
-      mime: a.file_type || null,
-      source: 'upload',
-    });
-  }
-  for (const c of m.content || []) {
-    if (c.type === 'tool_use' && c.name === 'create_file' && c.input) {
-      refs.push({
-        name: basename(c.input.path),
-        content: c.input.file_text ?? null,
-        path: c.input.path || null,
-        source: 'created',
-      });
-    }
-  }
-  return refs;
-}
-
-function normalizeClaude(raw) {
-  const messages = (raw.chat_messages || []).map((m) => {
-    const role = m.sender === 'human' ? 'human' : 'assistant';
-    const content = Array.isArray(m.content) ? m.content : [];
-
-    // Preserve the ORIGINAL order of content parts so tool calls / thinking land
-    // in their real position relative to the answer (Claude orders content[] as
-    // thinking → tool_use → tool_result → text as they actually happened).
-    const segments = [];
-    for (const c of content) {
-      if (c.type === 'text' && c.text) segments.push({ kind: 'text', text: c.text });
-      else if (c.type === 'thinking') segments.push({ kind: 'thinking', text: c.thinking || c.text || '' });
-      else if (c.type === 'tool_use') segments.push({ kind: 'tool_use', name: c.name, input: c.input });
-      else if (c.type === 'tool_result') segments.push({ kind: 'tool_result', name: c.name, result: c.content });
-    }
-    if (!segments.length && m.text) segments.push({ kind: 'text', text: m.text }); // older shapes
-
-    return {
-      id: m.uuid,
-      role,
-      createdAt: m.created_at,
-      segments,
-      // Derived views for the console preview (order doesn't matter here).
-      text: segments.filter((s) => s.kind === 'text').map((s) => s.text).join(''),
-      thinking: segments.filter((s) => s.kind === 'thinking').map((s) => s.text),
-      tools: segments.filter((s) => s.kind === 'tool_use' || s.kind === 'tool_result'),
-      files: collectFileRefs(m),
-    };
-  });
-
-  return {
-    id: raw.uuid,
-    platform: 'claude',
-    title: raw.name || '(untitled)',
-    url: `https://claude.ai/chat/${raw.uuid}`,
-    createdAt: raw.created_at,
-    updatedAt: raw.updated_at,
-    messages,
-  };
-}
-
-const NORMALIZERS = { claude: normalizeClaude };
+// Per-platform raw → ConversationModel normalizers live in ./normalize/.
+const NORMALIZERS = { claude: normalizeClaude, chatgpt: normalizeChatGPT };
 
 // ---- diff + log --------------------------------------------------------------
 function preview(text, n = 70) {
@@ -144,7 +73,7 @@ async function handleConversation(platform, raw) {
 }
 
 async function runConversationSync(conv) {
-  const turns = conv.messages.filter((m) => m.role === 'assistant').length;
+  const turns = conv.turns ?? conv.messages.filter((m) => m.role === 'assistant').length;
 
   console.groupCollapsed(
     `%c[ACNS] ${conv.platform} · ${conv.title}`,
@@ -181,16 +110,25 @@ async function runConversationSync(conv) {
     console.groupEnd();
 
     try {
-      const { newlySynced, ref } = await sink.sync(config, conv, seen);
+      const { newlySynced, ref, error } = await sink.sync(config, conv, seen);
+      // Mark whatever durably landed — even on a partial failure — so a long
+      // backfill resumes where it stopped instead of re-writing (= duplicating).
       if (newlySynced?.length) {
         await chrome.storage.local.set({
           [key]: { messageIds: [...seen, ...newlySynced], title: conv.title },
         });
       }
-      console.log(
-        `%c→ ${sink.id} ✓ wrote ${newlySynced?.length || 0} msg${ref ? ' → ' + ref : ''}`,
-        'color:#10b981'
-      );
+      if (error) {
+        console.warn(
+          `→ ${sink.id} partial: wrote ${newlySynced?.length || 0} msg, then failed (rest retries next trigger):`,
+          error.message
+        );
+      } else {
+        console.log(
+          `%c→ ${sink.id} ✓ wrote ${newlySynced?.length || 0} msg${ref ? ' → ' + ref : ''}`,
+          'color:#10b981'
+        );
+      }
     } catch (e) {
       console.warn(`→ ${sink.id} failed (will retry next trigger):`, e.message);
     }
@@ -198,8 +136,38 @@ async function runConversationSync(conv) {
   console.groupEnd();
 }
 
+// ---- force resync (popup) ------------------------------------------------ --
+// Clear this conversation's synced state for every sink, then ask the tab to
+// refetch. The empty synced set makes each sink do its "first sync = clean
+// rewrite" path (Notion archives+rebuilds the row, Cloudflare PUTs the full md),
+// so a re-sync can't duplicate content.
+async function forceResync({ platform, convId, tabId }) {
+  const active = await getActiveSinks();
+  if (!active.length) return { ok: false, message: '没有启用任何同步目标 — 先到设置页配置' };
+
+  // Inside the lock so we can't clear keys while a sync of this conversation is
+  // mid-write (it would re-add them at the end and the resync would be partial).
+  await withConvLock(convId, async () => {
+    const keys = SINKS.map((s) => `synced:${s.id}:${platform}:${convId}`);
+    await chrome.storage.local.remove(keys);
+  });
+
+  try {
+    await chrome.tabs.sendMessage(tabId, { kind: 'control', type: 'refetch' });
+  } catch (_) {
+    // No content script in the tab (extension was reloaded?). State is already
+    // cleared, so any future trigger rewrites everything — just tell the user.
+    return { ok: true, message: '已清除同步状态，但页面未响应 — 刷新该对话页即可重新同步' };
+  }
+  return { ok: true, message: '已触发重新同步（Notion 旧页面会归档重建）' };
+}
+
 // ---- message intake ----------------------------------------------------------
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.kind === 'control' && msg.type === 'forceResync') {
+    forceResync(msg).then(sendResponse, (e) => sendResponse({ ok: false, message: e.message }));
+    return true; // async response
+  }
   if (!msg || msg.kind !== 'capture') return;
   if (msg.type === 'conversation' && msg.payload && msg.payload.raw) {
     console.log(`[ACNS] recv conversation (source=${msg.payload.source})`);

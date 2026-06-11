@@ -36,6 +36,15 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
 
     const { pathname } = new URL(request.url);
+
+    // Settings-page「测试连接」: verifies reachability + write token without
+    // touching any object. 204 = token ok, 401 = bad/missing token.
+    if (pathname === '/auth-check') {
+      const auth = request.headers.get('Authorization') || '';
+      const ok = env.WRITE_TOKEN && auth === `Bearer ${env.WRITE_TOKEN}`;
+      return new Response(null, { status: ok ? 204 : 401, headers: cors() });
+    }
+
     const match = pathname.match(PATH_RE);
     if (!match) return new Response('Not found', { status: 404, headers: cors() });
     const id = match[1];
@@ -65,7 +74,11 @@ export default {
     }
     if (request.method === 'POST') {
       const obj = await env.BUCKET.get(key);
-      const existing = obj ? await obj.text() : '';
+      // Append to a missing object would create a headerless fragment (e.g. the
+      // user deleted it from R2 while the extension still thinks it synced).
+      // Refuse instead — the sink falls back to a full PUT and self-heals.
+      if (obj == null) return new Response('Not found (PUT a full document first)', { status: 404, headers: cors() });
+      const existing = await obj.text();
       await env.BUCKET.put(key, existing + body);
       return new Response('OK', { headers: cors() });
     }

@@ -10,6 +10,7 @@ const ENTRYPOINTS = [
   'src/content/bridge.js',
   'src/inject/main-world.js',
   'src/options/options.js',
+  'src/popup/popup.js',
 ];
 
 // local-config.js is gitignored and statically imported by notion.js. On a fresh
@@ -37,6 +38,7 @@ async function buildManifest() {
   m.background.service_worker = strip(m.background.service_worker);
   delete m.background.type;
   if (m.options_page) m.options_page = strip(m.options_page);
+  if (m.action?.default_popup) m.action.default_popup = strip(m.action.default_popup);
   for (const cs of m.content_scripts || []) cs.js = (cs.js || []).map(strip);
   await mkdir('dist', { recursive: true });
   await writeFile('dist/manifest.json', JSON.stringify(m, null, 2) + '\n');
@@ -46,6 +48,8 @@ async function buildManifest() {
 async function copyAssets() {
   await mkdir('dist/options', { recursive: true });
   await copyFile('src/options/options.html', 'dist/options/options.html');
+  await mkdir('dist/popup', { recursive: true });
+  await copyFile('src/popup/popup.html', 'dist/popup/popup.html');
 }
 
 const options = {

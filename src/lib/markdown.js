@@ -20,9 +20,10 @@ function quote(text) {
 }
 
 // fileUrlFor(file) → a URL when files are stored separately (link to it), or
-// null/undefined to inline the content (fallback).
-export function messageToMarkdown(m, fileUrlFor) {
-  const who = m.role === 'human' ? '🧑 You' : '🤖 Claude';
+// null/undefined to inline the content (fallback). assistantName is the
+// platform's display label ('Claude' / 'ChatGPT' / …).
+export function messageToMarkdown(m, fileUrlFor, assistantName = 'AI') {
+  const who = m.role === 'human' ? '🧑 You' : `🤖 ${assistantName}`;
   const t = when(m.createdAt);
   let out = `\n## ${who}${t ? ' · ' + t : ''}\n\n`;
   for (const s of m.segments || []) {
@@ -43,6 +44,6 @@ export function conversationHeader(conv) {
   return `# ${conv.title || '(untitled)'}\n\n_${conv.platform} · ${conv.url}_\n`;
 }
 
-export function messagesToMarkdown(messages, fileUrlFor) {
-  return messages.map((m) => messageToMarkdown(m, fileUrlFor)).join('\n');
+export function messagesToMarkdown(messages, fileUrlFor, assistantName) {
+  return messages.map((m) => messageToMarkdown(m, fileUrlFor, assistantName)).join('\n');
 }

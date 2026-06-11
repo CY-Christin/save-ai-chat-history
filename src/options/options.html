@@ -40,6 +40,17 @@
         font: inherit;
       }
       .field .help { color: #888; font-size: 12px; margin-top: 3px; }
+      .sink-foot { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+      .sink-foot button.secondary {
+        background: transparent;
+        color: #5b51e8;
+        border: 1px solid #5b51e88a;
+        padding: 5px 14px;
+        font-weight: 500;
+      }
+      .sink-foot button.secondary:hover { background: #5b51e814; }
+      .sink-foot button:disabled { opacity: 0.5; cursor: default; }
+      .test-result { font-size: 13px; }
       .switch { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #888; }
       .actions { margin-top: 24px; display: flex; align-items: center; gap: 14px; }
       button {
@@ -54,12 +65,13 @@
       }
       button:hover { background: #4b41d8; }
       #status { color: #10b981; font-size: 13px; }
-      .disabled .fields { opacity: 0.45; pointer-events: none; }
+      .disabled .fields,
+      .disabled .sink-foot { opacity: 0.45; pointer-events: none; }
     </style>
   </head>
   <body>
-    <h1>落地渠道设置</h1>
-    <p class="sub">每个渠道独立开关与配置；开启哪个就同步到哪个。</p>
+    <h1>同步目标设置</h1>
+    <p class="sub">每个同步目标独立开关与配置；开启哪个就同步到哪个。</p>
     <div id="sinks"></div>
     <div class="actions">
       <button id="save">保存</button>

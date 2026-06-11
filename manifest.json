@@ -4,21 +4,30 @@
   "version": "0.0.1",
   "description": "Archive AI conversations to Notion (and other pluggable sinks). Claude supported.",
   "permissions": ["storage"],
-  "host_permissions": ["https://claude.ai/*", "https://api.notion.com/*"],
+  "host_permissions": [
+    "https://claude.ai/*",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://api.notion.com/*"
+  ],
   "options_page": "src/options/options.html",
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "AI Chat Sync"
+  },
   "background": {
     "service_worker": "src/background/service-worker.js",
     "type": "module"
   },
   "content_scripts": [
     {
-      "matches": ["https://claude.ai/*"],
+      "matches": ["https://claude.ai/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
       "js": ["src/content/bridge.js"],
       "run_at": "document_start",
       "world": "ISOLATED"
     },
     {
-      "matches": ["https://claude.ai/*"],
+      "matches": ["https://claude.ai/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
       "js": ["src/inject/main-world.js"],
       "run_at": "document_start",
       "world": "MAIN"

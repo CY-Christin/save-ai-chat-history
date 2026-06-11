@@ -1,22 +1,20 @@
-// Notion sink — one of the pluggable landing channels (see sinks/registry.js).
+// Notion sink — one of the pluggable sync targets (see sinks/registry.js).
 //
 // Implements the sink contract: { id, name, configFields, sync(config, conv,
 // alreadySynced) → { newlySynced, ref } }. Config (token + root page id) is
 // passed in by the caller (resolved from chrome.storage / settings page), not
 // read here.
 //
-// Behavior: ensure structure (root page → "Claude" page → "Claude Conversations"
-// db, ids cached), upsert one row-page per conversation keyed by "Conversation
-// ID" (idempotent), then append fresh messages as blocks (markdown via martian),
-// respecting Notion API limits.
+// Behavior: ensure structure (root page → per-platform page, e.g. "Claude" →
+// "Claude Conversations" db, ids cached per platform), upsert one row-page per
+// conversation keyed by "Conversation ID" (idempotent), then append fresh
+// messages as blocks (markdown via martian), respecting Notion API limits.
 
 import { markdownToBlocks } from '@tryfabric/martian';
+import { platformLabel } from '../lib/platform.js';
 
 const NOTION = 'https://api.notion.com/v1';
 const VERSION = '2022-06-28';
-
-const DB_NAME = 'Claude Conversations';
-const PLATFORM_PAGE = 'Claude';
 
 // Property names (Chinese, per design). Centralized so a rename is one edit.
 const PROP = {
@@ -55,7 +53,15 @@ async function napi(token, path, method = 'GET', body) {
       continue;
     }
     const text = await res.text();
-    const data = text ? JSON.parse(text) : {};
+    let data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (_) {
+        // Gateway/HTML error page instead of JSON — surface a readable snippet.
+        data = { message: text.slice(0, 200) };
+      }
+    }
     if (!res.ok) {
       const err = new Error(`[notion] ${res.status} ${method} ${path}: ${data.message || text}`);
       err.status = res.status;
@@ -88,12 +94,15 @@ async function findChildByTitle(token, parentId, type, title) {
   return hit?.id || null;
 }
 
-// Ensure root → "Claude" page → "Claude Conversations" db exist. Source of truth
-// is Notion's ACTUAL content: we look up existing items by title and reuse them,
-// creating only what's missing — so a stale cache, a renamed/recreated structure,
-// or a user-deleted db can't cause duplicates. The cache is only a fast path.
-async function ensureStructure(cfg) {
-  const cacheKey = `notionStruct:${cfg.rootPageId}`;
+// Ensure root → platform page (e.g. "Claude") → "<Platform> Conversations" db
+// exist. Source of truth is Notion's ACTUAL content: we look up existing items
+// by title and reuse them, creating only what's missing — so a stale cache, a
+// renamed/recreated structure, or a user-deleted db can't cause duplicates.
+// The cache is only a fast path, keyed per platform.
+async function ensureStructure(cfg, platform) {
+  const pageName = platformLabel(platform);
+  const dbName = `${pageName} Conversations`;
+  const cacheKey = `notionStruct:${cfg.rootPageId}:${platform}`;
   const cached = (await chrome.storage.local.get(cacheKey))[cacheKey];
 
   // Fast path: cached db still live (not deleted/trashed) → use it as-is.
@@ -106,23 +115,45 @@ async function ensureStructure(cfg) {
     }
   }
 
+  // Migration: pre-multi-platform versions cached under notionStruct:{root}
+  // (claude only). Adopt that db if still live — title discovery below would
+  // miss a RENAMED page/db and create a duplicate structure beside it.
+  if (platform === 'claude' && !cached) {
+    const legacyKey = `notionStruct:${cfg.rootPageId}`;
+    const legacy = (await chrome.storage.local.get(legacyKey))[legacyKey];
+    if (legacy?.dbId) {
+      try {
+        const db = await napi(cfg.token, `/databases/${legacy.dbId}`);
+        if (!db.archived && !db.in_trash) {
+          const struct = { platformPageId: legacy.claudePageId, dbId: legacy.dbId };
+          await chrome.storage.local.set({ [cacheKey]: struct });
+          await chrome.storage.local.remove(legacyKey);
+          return struct;
+        }
+      } catch (e) {
+        if (e.status !== 404) throw e;
+      }
+      await chrome.storage.local.remove(legacyKey); // dead — clean up
+    }
+  }
+
   // Slow path: discover by title, create only what's missing.
   await napi(cfg.token, '/users/me'); // connectivity + token check
 
-  let claudePageId = await findChildByTitle(cfg.token, cfg.rootPageId, 'child_page', PLATFORM_PAGE);
-  if (!claudePageId) {
+  let platformPageId = await findChildByTitle(cfg.token, cfg.rootPageId, 'child_page', pageName);
+  if (!platformPageId) {
     const page = await napi(cfg.token, '/pages', 'POST', {
       parent: { type: 'page_id', page_id: cfg.rootPageId },
-      properties: { title: { title: [{ text: { content: PLATFORM_PAGE } }] } },
+      properties: { title: { title: [{ text: { content: pageName } }] } },
     });
-    claudePageId = page.id;
+    platformPageId = page.id;
   }
 
-  let dbId = await findChildByTitle(cfg.token, claudePageId, 'child_database', DB_NAME);
+  let dbId = await findChildByTitle(cfg.token, platformPageId, 'child_database', dbName);
   if (!dbId) {
     const db = await napi(cfg.token, '/databases', 'POST', {
-      parent: { type: 'page_id', page_id: claudePageId },
-      title: [{ text: { content: DB_NAME } }],
+      parent: { type: 'page_id', page_id: platformPageId },
+      title: [{ text: { content: dbName } }],
       properties: {
         [PROP.title]: { title: {} },
         [PROP.date]: { date: {} },
@@ -134,13 +165,18 @@ async function ensureStructure(cfg) {
     dbId = db.id;
   }
 
-  const struct = { claudePageId, dbId };
+  const struct = { platformPageId, dbId };
   await chrome.storage.local.set({ [cacheKey]: struct });
   return struct;
 }
 
 // ---- conversation row (idempotent by Conversation ID) ----------------------
-async function upsertConversationRow(cfg, dbId, conv, turns) {
+// isFirst = the local synced set is EMPTY for this conversation. If a row still
+// exists in Notion (state cleared, force resync, another device), appending all
+// messages again would duplicate every block — so on first sync we archive the
+// old row(s) and rebuild. Same semantics as the cloudflare sink's full PUT:
+// "first sync is a clean rewrite". Archived pages stay recoverable from trash.
+async function upsertConversationRow(cfg, dbId, conv, turns, isFirst) {
   const props = {
     [PROP.title]: { title: [{ text: { content: conv.title || '(untitled)' } }] },
     [PROP.turns]: { number: turns },
@@ -151,13 +187,27 @@ async function upsertConversationRow(cfg, dbId, conv, turns) {
 
   const q = await napi(cfg.token, `/databases/${dbId}/query`, 'POST', {
     filter: { property: PROP.convId, rich_text: { equals: conv.id } },
-    page_size: 1,
+    page_size: 5,
   });
 
   if (q.results?.length) {
-    const pageId = q.results[0].id;
-    await napi(cfg.token, `/pages/${pageId}`, 'PATCH', { properties: props });
-    return pageId;
+    if (!isFirst) {
+      const pageId = q.results[0].id;
+      await napi(cfg.token, `/pages/${pageId}`, 'PATCH', { properties: props });
+      return pageId;
+    }
+    // Empty row (no content blocks yet) → reuse it instead of archiving.
+    // Otherwise a persistent failure on the very first message write would
+    // archive + recreate the row on EVERY trigger (row churn in the trash).
+    const probe = await napi(cfg.token, `/blocks/${q.results[0].id}/children?page_size=1`);
+    if (!(probe.results || []).length) {
+      const pageId = q.results[0].id;
+      await napi(cfg.token, `/pages/${pageId}`, 'PATCH', { properties: props });
+      return pageId;
+    }
+    for (const row of q.results) {
+      await napi(cfg.token, `/pages/${row.id}`, 'PATCH', { archived: true });
+    }
   }
   const page = await napi(cfg.token, '/pages', 'POST', {
     parent: { type: 'database_id', database_id: dbId },
@@ -205,14 +255,14 @@ function toggleBlock(label, text) {
   };
 }
 
-function speakerCallout(message) {
+function speakerCallout(message, assistantName) {
   const human = message.role === 'human';
   const when = (message.createdAt || '').slice(0, 16).replace('T', ' ');
   return {
     object: 'block',
     type: 'callout',
     callout: {
-      rich_text: [{ type: 'text', text: { content: `${human ? 'You' : 'Claude'}${when ? ' · ' + when : ''}` } }],
+      rich_text: [{ type: 'text', text: { content: `${human ? 'You' : assistantName}${when ? ' · ' + when : ''}` } }],
       icon: { type: 'emoji', emoji: human ? '🧑' : '🤖' },
       color: human ? 'gray_background' : 'blue_background',
     },
@@ -235,8 +285,8 @@ function mdBlocks(text) {
   }
 }
 
-function buildMessageBlocks(message) {
-  const blocks = [speakerCallout(message)];
+function buildMessageBlocks(message, assistantName) {
+  const blocks = [speakerCallout(message, assistantName)];
   // Walk segments in original order → tool calls appear before the answer text,
   // matching how the turn actually unfolded.
   const segs = message.segments?.length
@@ -279,24 +329,102 @@ async function createFileChildPage(token, parentPageId, file) {
 
 // ---- sink ------------------------------------------------------------------
 // Writes fresh (not-yet-synced) messages. Returns ids that were successfully
-// written, so the caller marks them synced only after a durable write.
+// written, so the caller marks them synced only after a durable write. On a
+// mid-conversation failure (rate-limit budget exhausted, 5xx) it returns the
+// ids that DID land plus the error, instead of throwing — so a long backfill
+// resumes where it stopped rather than re-appending (= duplicating) everything.
 async function sync(config, conv, alreadySynced) {
-  const turns = conv.messages.filter((m) => m.role === 'assistant').length;
-  const { dbId } = await ensureStructure(config);
-  const pageId = await upsertConversationRow(config, dbId, conv, turns);
+  const turns = conv.turns ?? conv.messages.filter((m) => m.role === 'assistant').length;
+  const isFirst = alreadySynced.size === 0;
+  const assistantName = platformLabel(conv.platform);
+  const { dbId } = await ensureStructure(config, conv.platform);
+  const pageId = await upsertConversationRow(config, dbId, conv, turns, isFirst);
 
   const newlySynced = [];
   for (const m of conv.messages) {
     if (alreadySynced.has(m.id)) continue;
-    await appendInBatches(config.token, pageId, buildMessageBlocks(m));
-    // md files → child pages, appended right after this message's body.
-    for (const f of m.files || []) {
-      if (f.content) await createFileChildPage(config.token, pageId, f);
+    try {
+      await appendInBatches(config.token, pageId, buildMessageBlocks(m, assistantName));
+      // md files → child pages, appended right after this message's body.
+      for (const f of m.files || []) {
+        if (f.content) await createFileChildPage(config.token, pageId, f);
+      }
+    } catch (error) {
+      // 400 = Notion rejected the content itself (e.g. a link URL it considers
+      // invalid) — retrying identical blocks would stall this conversation
+      // forever. Degrade ONCE to plain paragraphs so the message lands and the
+      // rest of the conversation keeps flowing. (If an earlier batch of this
+      // message already landed, a few blocks duplicate — messy beats stuck.)
+      if (error.status === 400) {
+        try {
+          const plain = [
+            speakerCallout(m, assistantName),
+            ...paragraphBlocks(m.text || '(此消息内容被 Notion 拒绝，已降级为纯文本仍失败)'),
+          ];
+          await appendInBatches(config.token, pageId, plain);
+          console.warn(`[notion] message ${m.id} degraded to plain text (Notion rejected rich blocks)`);
+          newlySynced.push(m.id);
+          continue;
+        } catch (_) {
+          /* degraded write failed too — fall through to partial return */
+        }
+      }
+      return { newlySynced, ref: pageId, error };
     }
     newlySynced.push(m.id); // per-message durability boundary
   }
   return { newlySynced, ref: pageId };
 }
+
+// ---- settings-page「测试连接」 ------------------------------------------------
+async function testConnection(config) {
+  try {
+    await napi(config.token, '/users/me');
+  } catch (e) {
+    return {
+      ok: false,
+      message: e.status === 401 ? 'Token 无效（401）' : `Token 校验失败：${e.message}`,
+    };
+  }
+  try {
+    const page = await napi(config.token, `/pages/${config.rootPageId}`);
+    if (page.archived || page.in_trash) {
+      return { ok: false, message: '根页面在回收站中，请恢复它或换一个页面' };
+    }
+    const title =
+      page.properties?.title?.title?.map((t) => t.plain_text).join('') || '(untitled)';
+    return { ok: true, message: `连接成功 → 「${title}」` };
+  } catch (e) {
+    return {
+      ok: false,
+      message:
+        e.status === 404
+          ? '找不到根页面：ID 不对，或没把 integration 加进该页面的 Connections'
+          : `页面校验失败：${e.message}`,
+    };
+  }
+}
+
+// Accept what users actually paste: the full page URL, a dashed UUID, or the
+// bare 32-hex id — normalize all of them to the bare id. Unrecognized input is
+// returned as-is (the「测试连接」button will then say what's wrong).
+function normalizeRootPageId(v) {
+  v = String(v || '').replace(/\s+/g, '');
+  try {
+    if (/^https?:\/\//i.test(v)) {
+      const runs = new URL(v).pathname.match(/[0-9a-f]{32}/gi);
+      if (runs) return runs[runs.length - 1].toLowerCase();
+    }
+  } catch (_) {
+    /* not a URL — fall through */
+  }
+  if (/^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(v)) {
+    return v.replace(/-/g, '').toLowerCase();
+  }
+  return v;
+}
+
+const stripWhitespace = (v) => String(v || '').replace(/\s+/g, '');
 
 export const notionSink = {
   id: 'notion',
@@ -308,16 +436,19 @@ export const notionSink = {
       type: 'password',
       placeholder: 'ntn_...',
       required: true,
+      normalize: stripWhitespace,
       help: '在 notion.so/my-integrations 建 Internal integration 获取',
     },
     {
       key: 'rootPageId',
       label: 'Root Page ID',
       type: 'text',
-      placeholder: '32 位十六进制（取自 page URL）',
+      placeholder: '页面 URL 或 32 位十六进制 ID 均可',
       required: true,
-      help: '先把 integration 加到该 page 的 Connections 授权',
+      normalize: normalizeRootPageId,
+      help: '先把 integration 加到该 page 的 Connections 授权；直接粘贴页面 URL 会自动提取 ID',
     },
   ],
   sync,
+  testConnection,
 };
