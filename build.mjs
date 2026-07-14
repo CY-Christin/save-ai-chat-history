@@ -2,7 +2,6 @@
 // drop the `src/` prefix. Chrome loads dist/. Run `npm run build` or `npm run watch`.
 import esbuild from 'esbuild';
 import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const ENTRYPOINTS = [
@@ -13,23 +12,6 @@ const ENTRYPOINTS = [
   'src/popup/popup.js',
 ];
 
-// local-config.js is gitignored and statically imported by notion.js. On a fresh
-// clone it won't exist, so generate an empty stub to keep the bundle building.
-// (Real credentials go in chrome.storage via the settings page; this file is just
-// an optional dev shortcut.)
-const LOCAL_CONFIG_STUB =
-  `// LOCAL DEV ONLY — gitignored. Optional Notion credentials for quick local\n` +
-  `// testing. Leave empty to configure via the settings page (chrome.storage).\n` +
-  `export const LOCAL_NOTION = { token: '', rootPageId: '' };\n`;
-
-async function ensureLocalConfig() {
-  const p = 'src/background/local-config.js';
-  if (!existsSync(p)) {
-    await writeFile(p, LOCAL_CONFIG_STUB);
-    console.log('• created empty src/background/local-config.js (configure via settings, or fill in for dev)');
-  }
-}
-
 // Rewrite manifest for dist: strip `src/` prefixes; bundles are IIFE so the
 // background no longer needs `type: module`.
 async function buildManifest() {
@@ -39,17 +21,25 @@ async function buildManifest() {
   delete m.background.type;
   if (m.options_page) m.options_page = strip(m.options_page);
   if (m.action?.default_popup) m.action.default_popup = strip(m.action.default_popup);
+  for (const key of ['icons', 'action']) {
+    const table = key === 'action' ? m.action?.default_icon : m.icons;
+    for (const size of Object.keys(table || {})) table[size] = strip(table[size]);
+  }
   for (const cs of m.content_scripts || []) cs.js = (cs.js || []).map(strip);
   await mkdir('dist', { recursive: true });
   await writeFile('dist/manifest.json', JSON.stringify(m, null, 2) + '\n');
 }
 
-// Copy non-bundled static assets (HTML) into dist.
+// Copy non-bundled static assets (HTML, icons) into dist.
 async function copyAssets() {
   await mkdir('dist/options', { recursive: true });
   await copyFile('src/options/options.html', 'dist/options/options.html');
   await mkdir('dist/popup', { recursive: true });
   await copyFile('src/popup/popup.html', 'dist/popup/popup.html');
+  await mkdir('dist/icons', { recursive: true });
+  for (const size of [16, 32, 48, 128]) {
+    await copyFile(`src/icons/icon${size}.png`, `dist/icons/icon${size}.png`);
+  }
 }
 
 const options = {
@@ -68,7 +58,6 @@ const options = {
   },
 };
 
-await ensureLocalConfig();
 await buildManifest();
 await copyAssets();
 

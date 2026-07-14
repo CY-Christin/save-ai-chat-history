@@ -8,13 +8,11 @@
 
 import { SINKS } from '../sinks/registry.js';
 import { getSinkSettings, isConfigComplete } from './sink-settings.js';
-import { LOCAL_NOTION } from './local-config.js';
 import { normalizeClaude } from './normalize/claude.js';
 import { normalizeChatGPT } from './normalize/chatgpt.js';
 
 // Resolve which sinks to run: those explicitly enabled with complete config in
-// settings, plus a dev fallback — if Notion was never configured in settings but
-// local-config.js has values, run it (so hardcoded dev creds keep working).
+// settings.
 async function getActiveSinks() {
   const settings = await getSinkSettings();
   const active = [];
@@ -23,8 +21,6 @@ async function getActiveSinks() {
     if (setting?.enabled) {
       if (isConfigComplete(sink, setting.config)) active.push({ sink, config: setting.config });
       else console.log(`[ACNS] sink ${sink.id} enabled but config incomplete — skipped`);
-    } else if (!setting && sink.id === 'notion' && LOCAL_NOTION?.token && LOCAL_NOTION?.rootPageId) {
-      active.push({ sink, config: LOCAL_NOTION });
     }
   }
   return active;

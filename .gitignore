@@ -9,7 +9,6 @@ dist/
 .env
 .env.local
 *.local
-src/background/local-config.js
 worker/wrangler.toml
 
 # Wrangler local state/cache

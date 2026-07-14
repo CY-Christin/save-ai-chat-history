@@ -1,4 +1,4 @@
-// AI Chat → Notion Sync — raw markdown sink (Cloudflare Worker, R2-backed).
+// Save AI Chat History — raw markdown sink (Cloudflare Worker, R2-backed).
 //
 // Stores one markdown object per conversation (and per file) in R2, served at a
 // stable URL so an AI can fetch the full history directly.

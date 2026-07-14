@@ -1,12 +1,13 @@
 {
-  "name": "ai-chat-notion-sync",
+  "name": "save-ai-chat-history",
   "version": "0.0.1",
-  "description": "Archive AI conversations to Notion. Browser extension.",
+  "description": "Save AI Chat History — browser extension that archives AI conversations to Notion or Cloudflare R2.",
   "private": true,
   "license": "MIT",
   "scripts": {
     "build": "node build.mjs",
-    "watch": "node build.mjs --watch"
+    "watch": "node build.mjs --watch",
+    "package": "node package.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.24.0"

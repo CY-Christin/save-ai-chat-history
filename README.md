@@ -1,7 +1,8 @@
-# AI Chat → Notion Sync
+# Save AI Chat History
 
-A browser extension that archives your AI conversations to Notion — one
-conversation per Notion page, incrementally and without losing history.
+A browser extension that archives your AI conversations to pluggable sinks —
+Notion (one page per conversation) or your own Cloudflare Worker + R2 storage —
+incrementally and without losing history.
 
 - **Verbatim**: captures both your prompts and the AI's replies, preserving
   markdown and code blocks.

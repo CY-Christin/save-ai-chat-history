@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "AI Chat → Notion Sync (dev)",
+  "name": "Save AI Chat History",
   "version": "0.0.1",
-  "description": "Archive AI conversations to Notion (and other pluggable sinks). Claude supported.",
+  "description": "Auto-save your Claude & ChatGPT conversations to Notion or your own Cloudflare storage. Unofficial.",
+  "icons": {
+    "16": "src/icons/icon16.png",
+    "32": "src/icons/icon32.png",
+    "48": "src/icons/icon48.png",
+    "128": "src/icons/icon128.png"
+  },
   "permissions": ["storage"],
   "host_permissions": [
     "https://claude.ai/*",
@@ -13,7 +19,13 @@
   "options_page": "src/options/options.html",
   "action": {
     "default_popup": "src/popup/popup.html",
-    "default_title": "AI Chat Sync"
+    "default_title": "Save AI Chat History",
+    "default_icon": {
+      "16": "src/icons/icon16.png",
+      "32": "src/icons/icon32.png",
+      "48": "src/icons/icon48.png",
+      "128": "src/icons/icon128.png"
+    }
   },
   "background": {
     "service_worker": "src/background/service-worker.js",
