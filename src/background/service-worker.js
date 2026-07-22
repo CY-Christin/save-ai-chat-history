@@ -10,6 +10,9 @@ import { SINKS } from '../sinks/registry.js';
 import { getSinkSettings, isConfigComplete } from './sink-settings.js';
 import { normalizeClaude } from './normalize/claude.js';
 import { normalizeChatGPT } from './normalize/chatgpt.js';
+import { conversationHeader, messagesToMarkdown } from '../lib/markdown.js';
+import { platformLabel } from '../lib/platform.js';
+import { getCaptureSettings, EXTERNALIZE_MIN_MB } from './capture-settings.js';
 
 // Resolve which sinks to run: those explicitly enabled with complete config in
 // settings.
@@ -65,6 +68,11 @@ async function handleConversation(platform, raw) {
   const normalize = NORMALIZERS[platform];
   if (!normalize) return;
   const conv = normalize(raw);
+  const pending = pendingExports.get(conv.id);
+  if (pending) {
+    pendingExports.delete(conv.id);
+    pending.resolve(conv);
+  }
   return withConvLock(conv.id, () => runConversationSync(conv));
 }
 
@@ -158,10 +166,90 @@ async function forceResync({ platform, convId, tabId }) {
   return { ok: true, message: '已触发重新同步（Notion 旧页面会归档重建）' };
 }
 
+// ---- export (popup) -----------------------------------------------------------
+// Ask the tab to refetch, wait for that capture to land here, render it with the
+// same markdown pipeline the Cloudflare sink uses, and hand the result back for
+// the popup to download. Two shapes:
+//   kind 'md'  — one self-contained .md, file contents inlined
+//   kind 'zip' — .md referencing files by relative link + the files as separate
+//                entries (popup zips them); keeps the md readable when uploads
+//                are large
+// zip is used when the capture cap admits big files (≥2MB) AND the settings-page
+// 外置文件 checkbox is on AND the conversation actually has file contents;
+// otherwise a single .md. Independent of sink config on purpose: export works
+// with zero sinks enabled.
+const pendingExports = new Map(); // convId → { resolve }
+
+async function exportConversation({ convId, tabId }) {
+  const conv = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingExports.delete(convId);
+      reject(new Error('页面未响应 — 刷新该对话页后重试'));
+    }, 10000);
+    pendingExports.set(convId, {
+      resolve: (c) => {
+        clearTimeout(timer);
+        resolve(c);
+      },
+    });
+    chrome.tabs.sendMessage(tabId, { kind: 'control', type: 'refetch' }).catch(() => {
+      clearTimeout(timer);
+      pendingExports.delete(convId);
+      reject(new Error('页面未响应 — 刷新该对话页后重试'));
+    });
+  });
+
+  const who = platformLabel(conv.platform);
+  const withContent = conv.messages.flatMap((m) => (m.files || []).filter((f) => f.content));
+
+  const capture = await getCaptureSettings();
+  const kind =
+    capture.blobMaxMB >= EXTERNALIZE_MIN_MB &&
+    capture.externalizeFiles !== false &&
+    withContent.length
+      ? 'zip'
+      : 'md';
+
+  if (kind === 'md') {
+    const md =
+      conversationHeader(conv) + '\n' + messagesToMarkdown(conv.messages, null, who);
+    return { ok: true, kind, md, title: conv.title };
+  }
+
+  // zip: files land under files/ with collision-safe names; md links to them.
+  const used = new Set();
+  const stored = new Map(); // file ref → stored name
+  for (const f of withContent) {
+    const base = f.name || 'file';
+    const dot = base.lastIndexOf('.');
+    const [stem, ext] = dot > 0 ? [base.slice(0, dot), base.slice(dot)] : [base, ''];
+    let name = base;
+    for (let i = 2; used.has(name); i++) name = `${stem} (${i})${ext}`;
+    used.add(name);
+    stored.set(f, name);
+  }
+  const fileUrlFor = (f) => (stored.has(f) ? 'files/' + encodeURI(stored.get(f)) : null);
+  const md =
+    conversationHeader(conv) + '\n' + messagesToMarkdown(conv.messages, fileUrlFor, who);
+  return {
+    ok: true,
+    kind,
+    md,
+    title: conv.title,
+    files: withContent.map((f) => ({ name: stored.get(f), content: f.content })),
+  };
+}
+
 // ---- message intake ----------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.kind === 'control' && msg.type === 'forceResync') {
     forceResync(msg).then(sendResponse, (e) => sendResponse({ ok: false, message: e.message }));
+    return true; // async response
+  }
+  if (msg?.kind === 'control' && msg.type === 'export') {
+    exportConversation(msg).then(sendResponse, (e) =>
+      sendResponse({ ok: false, message: e.message })
+    );
     return true; // async response
   }
   if (!msg || msg.kind !== 'capture') return;

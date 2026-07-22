@@ -1,6 +1,6 @@
 {
   "name": "save-ai-chat-history",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Save AI Chat History — browser extension that archives AI conversations to Notion or Cloudflare R2.",
   "private": true,
   "license": "MIT",
@@ -13,6 +13,7 @@
     "esbuild": "^0.24.0"
   },
   "dependencies": {
-    "@tryfabric/martian": "^1.2.4"
+    "@tryfabric/martian": "^1.2.4",
+    "fflate": "^0.8.3"
   }
 }

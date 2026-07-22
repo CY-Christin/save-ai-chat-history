@@ -29,13 +29,25 @@
       #result { min-height: 1em; }
       .links { margin-top: 10px; border-top: 1px solid #8884; padding-top: 8px; }
       a { color: #5b51e8; text-decoration: none; font-size: 12px; }
+      #convUrl {
+        display: inline-block;
+        max-width: 190px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        vertical-align: bottom;
+      }
     </style>
   </head>
   <body>
     <h1>Save AI Chat History</h1>
     <div id="sinks" class="row">…</div>
     <div id="conv" class="row"></div>
+    <div id="convLink" class="row" hidden>
+      直链：<a id="convUrl" target="_blank"></a> <a href="#" id="convCopy">复制</a>
+    </div>
     <button id="resync" hidden>重新同步此对话</button>
+    <button id="export" hidden>导出</button>
     <div id="result" class="row"></div>
     <div class="links"><a href="#" id="openOptions">打开设置</a></div>
     <script src="popup.js"></script>

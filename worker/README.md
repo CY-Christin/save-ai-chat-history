@@ -36,7 +36,8 @@ and fill in:
 - **Worker URL**: the deployed URL above.
 - **Write Token**: the same value you set for `WRITE_TOKEN`.
 
-Each conversation is then readable at `<Worker URL>/conv/<conversation-id>`.
+Each conversation is then readable at `<Worker URL>/conv/<conversation-id>` —
+the popup shows (and copies) this link when you're on that conversation's page.
 
 ## Security
 
