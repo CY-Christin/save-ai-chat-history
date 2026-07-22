@@ -3,6 +3,29 @@
 // saves back. Field values are normalized on save (fix common paste mistakes).
 import { SINKS } from '../sinks/registry.js';
 import { getSinkSettings, setSinkSettings, isConfigComplete } from '../background/sink-settings.js';
+import {
+  getCaptureSettings,
+  setCaptureSettings,
+  EXTERNALIZE_MIN_MB,
+} from '../background/capture-settings.js';
+
+// ---- 抓取设置：非线性滑块 -----------------------------------------------------
+// 前松后紧的离散档位（MB）；range input 的值是档位下标。
+const BLOB_STOPS = [0, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100];
+const blobEl = document.getElementById('blobMax');
+const blobLabelEl = document.getElementById('blobMaxLabel');
+const externalizeField = document.getElementById('externalizeField');
+const externalizeEl = document.getElementById('externalize');
+
+const fmtMB = (mb) => (mb === 0 ? '0（不抓取）' : mb < 1 ? `${mb * 1024}KB` : `${mb}MB`);
+
+function syncBlobUI() {
+  const mb = BLOB_STOPS[+blobEl.value];
+  blobLabelEl.textContent = fmtMB(mb);
+  // 只有允许抓大文件时，「外置文件」才有意义。
+  externalizeField.hidden = mb < EXTERNALIZE_MIN_MB;
+}
+blobEl.addEventListener('input', syncBlobUI);
 
 const root = document.getElementById('sinks');
 const statusEl = document.getElementById('status');
@@ -115,6 +138,12 @@ function collect() {
 document.getElementById('save').addEventListener('click', async () => {
   const sinks = collect();
   await setSinkSettings(sinks);
+
+  await setCaptureSettings({
+    blobMaxMB: BLOB_STOPS[+blobEl.value],
+    externalizeFiles: externalizeEl.checked,
+  });
+
   // Re-render so normalized values (e.g. URL → extracted page id) are visible.
   render(sinks);
 
@@ -131,4 +160,13 @@ document.getElementById('save').addEventListener('click', async () => {
   }
 });
 
-(async () => render(await getSinkSettings()))();
+(async () => {
+  render(await getSinkSettings());
+  const capture = await getCaptureSettings();
+  // 旧值（自由数字时代存的，如 3）不一定落在档位上 — 取不小于它的最近档。
+  let idx = BLOB_STOPS.findIndex((s) => s >= capture.blobMaxMB);
+  if (idx < 0) idx = BLOB_STOPS.length - 1;
+  blobEl.value = idx;
+  externalizeEl.checked = capture.externalizeFiles !== false;
+  syncBlobUI();
+})();

@@ -6,8 +6,11 @@ function basename(p) {
   return String(p || '').split('/').pop() || String(p || '');
 }
 
-// Extract file refs WITH content from a message. Two sources carry real content:
-//  - uploaded files:  attachments[].extracted_content
+// Extract file refs WITH content from a message. Three sources carry real content:
+//  - text-extracted uploads: attachments[].extracted_content
+//  - blob uploads (.jsonl, …): files[].extracted_content — Claude serves these
+//    with no inline content; the MAIN-world enrich step downloads and inlines it
+//    (images/oversized/binary stay content-less and become name-only refs)
 //  - AI-created files: content[].tool_use[create_file].input.file_text
 // present_files / local_resource are display-only pointers (no content) and are
 // usually copies of already-captured files, so we skip them to avoid duplicates.
@@ -18,6 +21,17 @@ function collectFileRefs(m) {
       name: a.file_name || '(file)',
       content: a.extracted_content ?? null,
       mime: a.file_type || null,
+      source: 'upload',
+    });
+  }
+  for (const f of m.files || []) {
+    if (!f || typeof f !== 'object') continue;
+    refs.push({
+      name: f.file_name || '(file)',
+      content: f.extracted_content ?? null,
+      // Why content is missing (over size limit / binary / download failed),
+      // set by the MAIN-world enrich step; rendered next to the file name.
+      note: f.acns_note || null,
       source: 'upload',
     });
   }

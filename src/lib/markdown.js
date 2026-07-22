@@ -33,9 +33,12 @@ export function messageToMarkdown(m, fileUrlFor, assistantName = 'AI') {
     // tool_result is omitted (often large/noisy); revisit if needed.
   }
   for (const f of m.files || []) {
-    if (!f.content) continue;
     const url = fileUrlFor && fileUrlFor(f);
-    out += url ? `\n> 📎 [${f.name}](${url})\n` : fileBlock(f);
+    if (url) out += `\n> 📎 [${f.name}](${url})\n`;
+    else if (f.content) out += fileBlock(f);
+    // Content unavailable — name the file instead of silently omitting it, and
+    // say why when the capture layer told us (over size limit / binary / …).
+    else out += `\n> 📎 **${f.name}** _(${f.note || 'content not captured'})_\n`;
   }
   return out;
 }

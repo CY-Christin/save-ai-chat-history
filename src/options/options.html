@@ -30,7 +30,8 @@
       .fields { margin-top: 12px; }
       .field { margin: 10px 0; }
       .field label { display: block; font-weight: 600; margin-bottom: 3px; }
-      .field input {
+      .field input,
+      .field select {
         width: 100%;
         box-sizing: border-box;
         padding: 7px 9px;
@@ -39,6 +40,17 @@
         background: #fff1;
         font: inherit;
       }
+      .range-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+      .range-end { color: #888; font-size: 12px; }
+      .field input[type='range'] {
+        width: 220px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        accent-color: #5b51e8;
+      }
+      .field input[type='checkbox'] { width: auto; }
+      #blobMaxLabel { color: #5b51e8; font-weight: 700; }
       .field .help { color: #888; font-size: 12px; margin-top: 3px; }
       .sink-foot { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
       .sink-foot button.secondary {
@@ -70,9 +82,42 @@
     </style>
   </head>
   <body>
-    <h1>同步目标设置</h1>
+    <h1>设置</h1>
     <p class="sub">每个同步目标独立开关与配置；开启哪个就同步到哪个。</p>
     <div id="sinks"></div>
+    <div class="sink">
+      <div class="sink-head"><h2>抓取</h2></div>
+      <div class="fields">
+        <div class="field">
+          <label>上传文件抓取上限：<span id="blobMaxLabel"></span></label>
+          <div class="range-row">
+            <span class="range-end">0</span>
+            <input id="blobMax" type="range" min="0" max="9" step="1" list="blobStops" />
+            <span class="range-end">100M</span>
+          </div>
+          <datalist id="blobStops">
+            <option value="0"></option><option value="1"></option><option value="2"></option>
+            <option value="3"></option><option value="4"></option><option value="5"></option>
+            <option value="6"></option><option value="7"></option><option value="8"></option>
+            <option value="9"></option>
+          </datalist>
+          <div class="help">
+            Claude 对话里未被官方提取文本的上传文件（如 .jsonl）会下载并写入同步 / 导出内容；
+            超过此上限的只保留文件名和提示。0 则完全不抓取，只保留文件名。
+          </div>
+        </div>
+        <div class="field" id="externalizeField" hidden>
+          <label class="switch" style="font-size: 14px; color: inherit">
+            <input type="checkbox" id="externalize" />
+            导出时外置文件
+          </label>
+          <div class="help">
+            允许抓取大文件后，导出会打成 .zip：对话是一个 .md，文件本体放 files/
+            目录，md 里用相对链接引用，避免大文件撑爆正文。取消勾选则所有文件内联进单个 .md。
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="actions">
       <button id="save">保存</button>
       <span id="status"></span>
