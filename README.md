@@ -12,7 +12,9 @@
 - **不漏一轮**：基于消息 id 的增量 diff 同步，实时对话、历史回填、跨设备续聊走同一条路径。
 - **可插拔同步目标**：
   - **Notion** — 每个对话一页，文件作为子页面；
-  - **Cloudflare Worker + R2** — 原始 markdown，每个对话有稳定直链，可以直接丢给 AI 读。支持[一键部署](https://deploy.workers.cloudflare.com/?url=https://github.com/CY-Christin/save-ai-chat-history/tree/main/worker)，手动部署教程见 [worker/README.md](worker/README.md)。
+  - **Cloudflare Worker + R2** — 原始 markdown，每个对话有稳定直链，可以直接丢给 AI 读。支持一键部署，手动部署教程见 [worker/README.md](worker/README.md)：
+
+    [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/CY-Christin/save-ai-chat-history/tree/main/worker)
 - **一键导出**：popup 里把当前对话导出为 `.md`；允许抓取大文件时自动打包 `.zip`（正文一个 md，文件外置在 `files/` 目录、相对链接引用）。
 
 ## 使用
