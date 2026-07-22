@@ -12,7 +12,7 @@ A browser extension that archives your Claude / ChatGPT conversations — verbat
 - **Never miss a turn**: message-id based diff sync — live chat, history backfill, and cross-device continuation all go through the same path.
 - **Pluggable sinks**:
   - **Notion** — one page per conversation, files as child pages;
-  - **Cloudflare Worker + R2** — raw markdown with a stable per-conversation URL you can hand straight to an AI (deployment: [worker/README.md](worker/README.md)).
+  - **Cloudflare Worker + R2** — raw markdown with a stable per-conversation URL you can hand straight to an AI. [One-click deploy](https://deploy.workers.cloudflare.com/?url=https://github.com/CY-Christin/save-ai-chat-history/tree/main/worker) supported; manual guide (Chinese): [worker/README.md](worker/README.md).
 - **One-click export**: export the current conversation as `.md` from the popup; when large files are captured it becomes a `.zip` (one md + files under `files/`, referenced by relative links).
 
 ## Usage

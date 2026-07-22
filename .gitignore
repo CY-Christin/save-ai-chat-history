@@ -9,7 +9,7 @@ dist/
 .env
 .env.local
 *.local
-worker/wrangler.toml
+worker/.dev.vars
 
 # Wrangler local state/cache
 .wrangler/

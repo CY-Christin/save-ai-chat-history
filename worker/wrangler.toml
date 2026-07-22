@@ -1,0 +1,10 @@
+name = "ai-chat-md"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+
+# R2 bucket: one markdown object per conversation / file. The Deploy to
+# Cloudflare button provisions it automatically; manual deploys create it
+# first (see README).
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ai-chat-md"

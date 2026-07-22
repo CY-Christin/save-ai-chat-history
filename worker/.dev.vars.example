@@ -1,0 +1,4 @@
+# Secrets the Worker needs. Local dev: `cp .dev.vars.example .dev.vars` and
+# fill in real values. Production: `npx wrangler secret put WRITE_TOKEN`
+# (or add it as a Secret in the dashboard).
+WRITE_TOKEN="replace-with-a-long-random-string"
