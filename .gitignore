@@ -14,8 +14,9 @@ worker/wrangler.toml
 # Wrangler local state/cache
 .wrangler/
 
-# Internal design docs — kept local, not published
+# Internal design docs / requirement archives — kept local, not published
 docs/
+archive/
 
 # Editor / OS
 .DS_Store
